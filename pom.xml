@@ -26,7 +26,29 @@
 
   <groupId>com.cloudbees.thirdparty</groupId>
   <artifactId>zendesk-java-client</artifactId>
-  <version>0.14.1-voxbone-0.0.3</version>
+  <version>${revision}${sha1}${changelist}</version>
+
+  <properties>
+    <revision>0.14.1-voxbone-0.0.3</revision>
+    <sha1></sha1>
+    <changelist></changelist>
+    <artifact.name>bwi-zendesk-java-client</artifact.name>
+
+    <maven.compiler.source>1.8</maven.compiler.source>
+    <maven.compiler.target>1.8</maven.compiler.target>
+
+    <!-- Sonar analysis configuration -->
+    <sonar.projectName>Dev :: Zendesk Java Client</sonar.projectName>
+    <sonar.projectVersion>${revision}</sonar.projectVersion>
+    <sonar.coverage.jacoco.xmlReportPaths>${basedir}/target/site/jacoco/jacoco.xml</sonar.coverage.jacoco.xmlReportPaths>
+    <sonar.javascript.lcov.reportPaths>${project.basedir}/reports/coverage/lcov.info</sonar.javascript.lcov.reportPaths>
+    <sonar.exclusions>
+    </sonar.exclusions>
+    <sonar.coverage.exclusions>
+    </sonar.coverage.exclusions>
+    <sonar.cpd.exclusions>
+    </sonar.cpd.exclusions>
+  </properties>
 
     <name>zendesk-java-client</name>
     <description>Java client for the Zendesk API</description>
@@ -88,13 +110,6 @@
     <system>codeship</system>
     <url>https://app.codeship.com/projects/302087</url>
   </ciManagement>
-
-    <properties>
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <maven.compiler.target>1.8</maven.compiler.target>
-        <serverId>voxbone-nexus</serverId>
-        <nexusUrl></nexusUrl>
-    </properties>
 
   <dependencyManagement>
     <dependencies>
@@ -185,11 +200,9 @@
           <version>3.0.0-M3</version>
         </plugin>
         <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-surefire-plugin</artifactId>
-          <configuration>
-            <rerunFailingTestsCount>3</rerunFailingTestsCount>
-          </configuration>
+          <groupId>org.jfrog.buildinfo</groupId>
+          <artifactId>artifactory-maven-plugin</artifactId>
+          <version>${maven-artifactory-plugin}</version>
         </plugin>
       </plugins>
     </pluginManagement>
@@ -257,6 +270,44 @@
           </dependency>
         </dependencies>
       </plugin>
+      <plugin>
+        <groupId>org.jfrog.buildinfo</groupId>
+        <artifactId>artifactory-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>build-info</id>
+            <goals>
+              <goal>publish</goal>
+            </goals>
+            <configuration>
+              <artifactory>
+                <includeEnvVars>true</includeEnvVars>
+                <envVarsExcludePatterns>*password*,*secret*,*key*,*token*,*passphrase*</envVarsExcludePatterns>
+                <timeoutSec>60</timeoutSec>
+              </artifactory>
+              <deployProperties>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>${project.artifactId}</artifactId>
+                <version>${project.version}</version>
+              </deployProperties>
+              <publisher>
+                <contextUrl>https://bandwidth.jfrog.io/artifactory</contextUrl>
+                <username>${JFROG_USER}</username>
+                <password>${JFROG_API_KEY}</password>
+                <repoKey>bwi-maven-local-prod</repoKey>
+                <snapshotRepoKey>bwi-maven-local</snapshotRepoKey>
+                <publishArtifacts>true</publishArtifacts>
+                <publishBuildInfo>true</publishBuildInfo>
+              </publisher>
+              <buildInfo>
+                <buildName>${artifact.name}</buildName>
+                <buildNumber>${sha1}</buildNumber>
+                <buildUrl>{{BUILD_URL}}</buildUrl>
+              </buildInfo>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
 
@@ -298,15 +349,22 @@
     </profile>
   </profiles>
 
-    <distributionManagement>
-        <repository>
-            <id>voxbone-nexus</id>
-            <url>${nexusUrl}/releases</url>
-        </repository>
-        <snapshotRepository>
-            <id>voxbone-nexus</id>
-            <url>${nexusUrl}/snapshots</url>
-        </snapshotRepository>
-    </distributionManagement>
+  <repositories>
+    <repository>
+      <snapshots/>
+      <id>bwi-maven-local</id>
+      <name>BWI Maven development repository</name>
+      <url>https://bandwidth.jfrog.io/artifactory/maven</url>
+    </repository>
+
+    <repository>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
+      <id>bwi-maven-local-prod</id>
+      <name>BWI Maven production repository</name>
+      <url>https://bandwidth.jfrog.io/artifactory/maven-prod</url>
+    </repository>
+  </repositories>
 
 </project>
