@@ -1,72 +1,116 @@
 #!groovy
-def repo = 'zendesk-java-client'
+ARTIFACT_GENERATION_SLACK_CHANNEL = '#bwi-delivery-artifact-generation'
+def JOB_LABEL = 'regular'
 properties(
-        [
-                [
-                        $class  : 'BuildDiscarderProperty',
-                        strategy: [$class: 'LogRotator', numToKeepStr: '3']
-                ],
-                pipelineTriggers([pollSCM('H/5 * * * *')]),
-                disableConcurrentBuilds(),
-        ]
+  [
+    [$class: 'BuildDiscarderProperty', strategy: [$class: 'LogRotator', numToKeepStr: '10']],
+    disableConcurrentBuilds(),
+  ]
 )
 
-@NonCPS
-def getProjectKey(repo) {
-    return repo + '_' + env.BRANCH_NAME.replaceAll("/", "_")
+def getRepositoryName() {
+    return scm.getUserRemoteConfigs()[0]?.getUrl().replaceFirst(/^.*\/([^\/]+?).git$/, '$1')
 }
 
-def shouldPublish() {
-    def snapshot = readMavenPom().version.contains('-SNAPSHOT')
-    if (env.BRANCH_NAME == 'master' && !snapshot)
-    {
-        return true
-    }
-    else if (env.BRANCH_NAME != 'master' && snapshot)
-    {
-        return true
-    }
-    return false
+def getRevision() {
+    def matcher = readFile('pom.xml') =~ '<revision>(.+?)</revision>'
+    return matcher ? matcher[0][1] : null
 }
 
-node('regular') {
-  stage("Initial clean-up") {
-    deleteDir()
-  }
+def getChangelist() {
+    if (env.BRANCH_NAME == 'main') {
+        def matcher = readFile('pom.xml') =~ '<changelist>(.+?)</changelist>'
+        return matcher ? matcher[0][1] : ""
+    } else
+        return "-SNAPSHOT"
+}
 
-  ws("workspace/${getProjectKey(repo)}")
-  {
-    try
-    {
-      stage("Checkout") {
-        checkout scm
-      }
-      stage("Run UT/IT - ${getProjectKey(repo)}") {
-        withMaven(options: [artifactsPublisher(disabled: true), dependenciesFingerprintPublisher(disabled: true)], maven: 'maven') {
-          sh "mvn -T 16C clean install -fae -U -q"
-        }
-      }
-      stage("Publish to nexus - ${getProjectKey(repo)}") {
+def getCommitSHA() {
+    return sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+}
 
-        if (shouldPublish())
-        {
-            withMaven(options: [artifactsPublisher(disabled: true), dependenciesFingerprintPublisher(disabled: true)], maven: 'maven') {
-                sh "mvn clean deploy -DskipTests -fae -U -q -DnexusUrl=${NEXUS_URL}"
+def getSha1() {
+    if (env.BRANCH_NAME == 'main' && getChangelist() != '-SNAPSHOT')
+        return ""
+    else
+        return "-" + getCommitSHA();
+}
+
+pipeline {
+    agent {
+        label JOB_LABEL
+    }
+    options {
+        skipDefaultCheckout(true)
+        disableResume()
+        timeout(time: 30, unit: 'MINUTES')
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout([
+                        $class           : 'GitSCM',
+                        branches         : scm.branches,
+                        userRemoteConfigs: [[
+                                                    url          : scm.getUserRemoteConfigs()[0].getUrl(),
+                                                    credentialsId: scm.getUserRemoteConfigs()[0].getCredentialsId(),
+                                                    refspec      : scm.getUserRemoteConfigs()[0].getRefspec() + ' +refs/heads/main:refs/remotes/origin/main'
+                                            ]],
+                        extensions       : [
+                                [$class: 'CleanBeforeCheckout'],
+                                [$class: 'CleanCheckout'],
+                                [$class: 'CloneOption', depth: 0, noTags: true, honorRefspec: true, shallow: false]
+                        ]
+                ])
             }
         }
-        else
-        {
-            sh "echo 'Branch ${env.BRANCH_NAME} cannot publish this version of the artifact (only master can publish release version / other branches snapshots)'"
+        stage('Run UT tests') {
+            steps {
+                withMaven(mavenSettingsConfig: 'maven_default_settings', options: [artifactsPublisher(disabled: true), dependenciesFingerprintPublisher(disabled: true)], maven: 'maven') {
+                    sh 'mvn clean package -T1C -fae'
+
+                }
+            }
         }
-      }
+
+        stage('Code analysis') {
+            steps {
+                withSonarQubeEnv('Sonar') {
+                    withMaven(mavenSettingsConfig: 'maven_default_settings', options: [artifactsPublisher(disabled: true), dependenciesFingerprintPublisher(disabled: true)], maven: 'maven') {
+                        withEnv(["BRANCH_NAME=${env.BRANCH_NAME}"]) {
+                            sh 'mvn sonar:sonar -Dsonar.branch.name=$BRANCH_NAME'
+                        }
+                    }
+                }
+                timeout(time: 30, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+        stage('Generating artifacts and pushing them to maven repository') {
+            steps {
+                withMaven(mavenSettingsConfig: 'maven_default_settings', options: [artifactsPublisher(disabled: true), dependenciesFingerprintPublisher(disabled: true)], maven: 'maven') {
+                    withEnv(["SHA1=${getSha1()}", "CHANGELIST=${getChangelist()}"]) {
+                        withCredentials([usernamePassword(credentialsId: 'jfrog', usernameVariable: 'JFROG_USER', passwordVariable: 'JFROG_API_KEY')]) {
+                            sh 'mvn clean deploy -T 1C -DskipTests -Dsha1=$SHA1 -Dchangelist=$CHANGELIST -DJFROG_USER=$JFROG_USER -DJFROG_API_KEY=$JFROG_API_KEY'
+                        }
+                    }
+                }
+                slackSend(
+                        channel: "${ARTIFACT_GENERATION_SLACK_CHANNEL}",
+                        color: "good",
+                        message: "- All maven artifacts generated by the project ${getRepositoryName()} have been deployed (version ${getRevision()}${getSha1()}${getChangelist()}). " +
+                                "You can browse the artifact deployed <https://bandwidth.jfrog.io/artifactory/webapp/builds/${getRepositoryName()}/${getCommitSHA()}|here>"
+                )
+            }
+        }
     }
-    catch(e){
-      throw e
+    post {
+        always {
+            cleanWs()
+            dir("${env.WORKSPACE}@tmp") {
+                deleteDir()
+            }
+        }
     }
-    finally {
-      stage("Cleanup") {
-        deleteDir()
-      }
-    }
-  }
 }
